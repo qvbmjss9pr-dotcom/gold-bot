@@ -245,7 +245,9 @@ async def news_check_job():
 async def main():
     tz        = pytz.timezone(TIMEZONE)
     scheduler = AsyncIOScheduler(timezone=tz)
-    scheduler.add_job(daily_report_job, "cron",     hour=0,   minute=0)
+    scheduler.add_job(daily_report_job, "cron", hour=0, minute=0)
+scheduler.add_job(daily_report_job, "date")
+
     scheduler.add_job(alert_check_job,  "interval", minutes=15)
     scheduler.add_job(news_check_job,   "interval", minutes=30)
     scheduler.start()
