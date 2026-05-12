@@ -34,8 +34,7 @@ async def send_telegram(text: str):
 async def call_claude(prompt: str, max_tokens: int = 6000) -> str:
     client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
     message = client.messages.create(
-      model="claude-sonnet-4-5",
-
+        model="claude-sonnet-4-5",
         max_tokens=max_tokens,
         tools=[{"type": "web_search_20250305", "name": "web_search"}],
         messages=[{"role": "user", "content": prompt}],
@@ -246,8 +245,7 @@ async def main():
     tz        = pytz.timezone(TIMEZONE)
     scheduler = AsyncIOScheduler(timezone=tz)
     scheduler.add_job(daily_report_job, "cron", hour=0, minute=0)
-scheduler.add_job(daily_report_job, "date")
-
+    scheduler.add_job(daily_report_job, "date")
     scheduler.add_job(alert_check_job,  "interval", minutes=15)
     scheduler.add_job(news_check_job,   "interval", minutes=30)
     scheduler.start()
