@@ -34,7 +34,8 @@ async def send_telegram(text: str):
 async def call_claude(prompt: str, max_tokens: int = 6000) -> str:
     client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
     message = client.messages.create(
-        model="claude-sonnet-4-20250514",
+      model="claude-sonnet-4-5",
+
         max_tokens=max_tokens,
         tools=[{"type": "web_search_20250305", "name": "web_search"}],
         messages=[{"role": "user", "content": prompt}],
