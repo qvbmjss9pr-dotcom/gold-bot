@@ -3,9 +3,11 @@ import asyncio
 import anthropic
 import httpx
 import json
+import hashlib
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from datetime import datetime
 import pytz
+from bs4 import BeautifulSoup
 
 # Configuration
 TELEGRAM_TOKEN    = os.environ["TELEGRAM_TOKEN"]
@@ -18,7 +20,6 @@ alert_levels: dict = {}
 seen_news: set = set()
 last_gold_price: float = 0.0
 
-# Symbols to fetch
 SYMBOLS = {
     "EURUSD": "EUR/USD",
     "GBPUSD": "GBP/USD",
@@ -32,7 +33,7 @@ SYMBOLS = {
     "BTCUSD": "BTC/USD",
 }
 
-# Fetch real prices from Twelve Data
+# Fetch real prices
 async def fetch_prices() -> dict:
     prices = {}
     symbols = ",".join(SYMBOLS.values())
@@ -90,6 +91,96 @@ def extract_json(text: str):
         print(f"[JSON Error] {e}")
         return None
 
+# Scrape Iraqi Securities Commission directly
+async def scrape_isc() -> list:
+    news = []
+    try:
+        async with httpx.AsyncClient(timeout=20, follow_redirects=True) as client:
+            resp = await client.get("https://isc.gov.iq/", headers={"User-Agent": "Mozilla/5.0"})
+            soup = BeautifulSoup(resp.text, "html.parser")
+            items = soup.find_all(["article", "div", "li"], limit=30)
+            for item in items:
+                text = item.get_text(strip=True)
+                links = item.find_all("a", href=True)
+                if len(text) > 30:
+                    news_id = hashlib.md5(text[:100].encode()).hexdigest()
+                    link = ""
+                    for a in links:
+                        href = a.get("href", "")
+                        if href.startswith("http") or href.startswith("/"):
+                            link = href if href.startswith("http") else f"https://isc.gov.iq{href}"
+                            break
+                    news.append({"id": news_id, "text": text[:300], "link": link, "source": "هيئة الأوراق المالية العراقية"})
+    except Exception as e:
+        print(f"[ISC Scrape Error] {e}")
+    return news
+
+# Scrape Iraq Stock Exchange
+async def scrape_isx() -> list:
+    news = []
+    try:
+        async with httpx.AsyncClient(timeout=20, follow_redirects=True) as client:
+            resp = await client.get("https://www.isx-iq.net/isxportal/portal/newsDisplay.html", headers={"User-Agent": "Mozilla/5.0"})
+            soup = BeautifulSoup(resp.text, "html.parser")
+            rows = soup.find_all(["tr", "div", "article"], limit=20)
+            for row in rows:
+                text = row.get_text(strip=True)
+                if len(text) > 30:
+                    news_id = hashlib.md5(text[:100].encode()).hexdigest()
+                    news.append({"id": news_id, "text": text[:300], "link": "", "source": "بورصة العراق للأوراق المالية"})
+    except Exception as e:
+        print(f"[ISX Scrape Error] {e}")
+    return news
+
+# Scrape Dubai Financial Market
+async def scrape_dfm() -> list:
+    news = []
+    try:
+        async with httpx.AsyncClient(timeout=20, follow_redirects=True) as client:
+            resp = await client.get("https://www.dfm.ae/en/news", headers={"User-Agent": "Mozilla/5.0"})
+            soup = BeautifulSoup(resp.text, "html.parser")
+            items = soup.find_all(["article", "div", "li"], limit=20)
+            for item in items:
+                text = item.get_text(strip=True)
+                if len(text) > 30:
+                    news_id = hashlib.md5(text[:100].encode()).hexdigest()
+                    links = item.find_all("a", href=True)
+                    link = ""
+                    for a in links:
+                        href = a.get("href", "")
+                        if href:
+                            link = href if href.startswith("http") else f"https://www.dfm.ae{href}"
+                            break
+                    news.append({"id": news_id, "text": text[:300], "link": link, "source": "سوق دبي المالي"})
+    except Exception as e:
+        print(f"[DFM Scrape Error] {e}")
+    return news
+
+# Local Markets Job
+async def local_markets_job():
+    global seen_news
+    all_news = []
+    all_news += await scrape_isc()
+    all_news += await scrape_isx()
+    all_news += await scrape_dfm()
+
+    for item in all_news:
+        news_id = item.get("id", "")
+        if not news_id or news_id in seen_news:
+            continue
+        text = item.get("text", "").strip()
+        if len(text) < 50:
+            continue
+        seen_news.add(news_id)
+        source = item.get("source", "")
+        link = item.get("link", "")
+        emoji = "🇮🇶" if "عراق" in source or "العراق" in source else "🇦🇪"
+        msg = f"{emoji} *{source}*\n\n{text}"
+        if link:
+            msg += f"\n\n🔗 {link}"
+        await send_telegram(msg)
+        await asyncio.sleep(1)
+
 # Daily Report
 async def daily_report_job():
     global alert_levels
@@ -101,7 +192,7 @@ async def daily_report_job():
         prompt = f"""
 أنت محلل أسواق مالي محترف. أصدر نشرة يومية شاملة بعد إغلاق الأسواق.
 
-الأسعار الحالية الدقيقة من Twelve Data:
+الأسعار الحالية الدقيقة:
 {prices_text}
 
 الأصول المطلوب تحليلها:
@@ -112,15 +203,14 @@ async def daily_report_job():
 - مؤشرات: S&P 500, NASDAQ, DAX, DOW JONES
 
 لكل أصل اذكر:
-1. سعر الإغلاق الدقيق (من البيانات أعلاه)
+1. سعر الإغلاق الدقيق
 2. الاتجاه العام
 3. أهم دعم ومقاومة
 4. البيفوت: R2, R1, PP, S1, S2
 5. توصية: شراء/بيع/انتظار + دخول + هدف + وقف خسارة
 
-ثم أضف قسم:
-## 📰 أهم الأخبار المؤثرة على الذهب والدولار اليوم
-(ابحث عن أهم 5 أخبار اقتصادية وجيوسياسية مؤثرة)
+ثم أضف:
+## 📰 أهم أخبار اليوم المؤثرة على الذهب والدولار
 
 في آخر ردك أضف JSON:
 [JSON_START]
@@ -152,7 +242,7 @@ async def daily_report_job():
         print(f"[Report Error] {e}")
         await send_telegram(f"⚠️ خطأ في النشرة:\n`{e}`")
 
-# Gold Live Update every 15 min
+# Gold Live Update
 async def gold_update_job():
     global last_gold_price
     try:
@@ -199,19 +289,19 @@ async def alert_check_job():
     except Exception as e:
         print(f"[Alert Error] {e}")
 
-# News Check
+# Gold & Dollar News
 async def news_check_job():
     global seen_news
     try:
         prompt = """
-ابحث عن أهم الأخبار الاقتصادية والجيوسياسية المؤثرة على الذهب والدولار الصادرة خلال آخر 30 دقيقة فقط.
+ابحث عن أهم الأخبار الاقتصادية والجيوسياسية المؤثرة على الذهب والدولار خلال آخر 30 دقيقة فقط.
 
 أجب بـ JSON بين [JSON_START] و [JSON_END]:
 [JSON_START]
 [{"id":"id_فريد","title":"عنوان الخبر","summary":"ملخص في جملتين","impact":"high/medium","time":"الوقت"}]
 [JSON_END]
 
-إذا لم توجد أخبار جديدة مهمة خلال 30 دقيقة: [JSON_START][][JSON_END]
+إذا لم توجد أخبار مهمة جديدة: [JSON_START][][JSON_END]
 """
         response = await call_claude(prompt, max_tokens=1500)
         news_list = extract_json(response)
@@ -234,62 +324,28 @@ async def news_check_job():
     except Exception as e:
         print(f"[News Error] {e}")
 
-# Iraqi & Dubai Markets News
-async def local_markets_job():
-    global seen_news
-    try:
-        prompt = """
-ابحث عن أحدث الأخبار من بورصة العراق (isx-iq.net) وهيئة الأوراق المالية العراقية (isc.gov.iq) وسوق دبي المالي (dfm.ae) خلال آخر 30 دقيقة.
-
-أجب بـ JSON بين [JSON_START] و [JSON_END]:
-[JSON_START]
-[{"id":"id_فريد","source":"بورصة العراق","title":"عنوان","summary":"ملخص","time":"الوقت"}]
-[JSON_END]
-
-إذا لم توجد أخبار: [JSON_START][][JSON_END]
-"""
-        response = await call_claude(prompt, max_tokens=1500)
-        news_list = extract_json(response)
-        if not news_list or not isinstance(news_list, list):
-            return
-        for news in news_list:
-            news_id = news.get("id", "")
-            if not news_id or news_id in seen_news:
-                continue
-            seen_news.add(news_id)
-            source = news.get("source", "")
-            emoji = "🇮🇶" if "عراق" in source else "🇦🇪"
-            msg = (
-                f"{emoji} *خبر عاجل | {source}*\n\n"
-                f"📌 {news.get('title','')}\n\n"
-                f"{news.get('summary','')}\n\n"
-                f"🕐 {news.get('time','')}"
-            )
-            await send_telegram(msg)
-    except Exception as e:
-        print(f"[Local News Error] {e}")
-
 # Main
 async def main():
     tz        = pytz.timezone(TIMEZONE)
     scheduler = AsyncIOScheduler(timezone=tz)
-    scheduler.add_job(daily_report_job,   "cron",     hour=0,    minute=0)
-    scheduler.add_job(daily_report_job,   "date")
-    scheduler.add_job(gold_update_job,    "interval", minutes=15)
-    scheduler.add_job(alert_check_job,    "interval", minutes=15)
-    scheduler.add_job(news_check_job,     "interval", minutes=30)
-    scheduler.add_job(local_markets_job,  "interval", minutes=30)
+    scheduler.add_job(daily_report_job,  "cron",     hour=0,    minute=0)
+    scheduler.add_job(daily_report_job,  "date")
+    scheduler.add_job(gold_update_job,   "interval", minutes=15)
+    scheduler.add_job(alert_check_job,   "interval", minutes=15)
+    scheduler.add_job(news_check_job,    "interval", minutes=30)
+    scheduler.add_job(local_markets_job, "interval", minutes=30)
     scheduler.start()
 
     print(f"✅ Bot started | {TIMEZONE}")
 
     await send_telegram(
-        "🤖 *بوت الأسواق المالية — النسخة المحدّثة*\n\n"
+        "🤖 *بوت الأسواق المالية — النسخة النهائية*\n\n"
         "📅 النشرة اليومية: 12:00 ليلاً\n"
-        "🥇 تحديث الذهب اللحظي: كل 15 دقيقة\n"
-        "⚡️ تنبيهات كسر المستويات: كل 15 دقيقة\n"
+        "🥇 تحديث الذهب: كل 15 دقيقة\n"
+        "⚡️ تنبيهات المستويات: كل 15 دقيقة\n"
         "📰 أخبار الذهب والدولار: كل 30 دقيقة\n"
-        "🇮🇶🇦🇪 أخبار بورصة العراق ودبي: كل 30 دقيقة\n\n"
+        "🇮🇶 بورصة العراق وهيئة الأوراق المالية: مباشر\n"
+        "🇦🇪 سوق دبي المالي: مباشر\n\n"
         "✅ أسعار دقيقة من Twelve Data"
     )
 
@@ -298,4 +354,3 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
-
