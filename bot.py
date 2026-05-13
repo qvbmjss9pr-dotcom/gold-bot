@@ -4,10 +4,10 @@ import anthropic
 import httpx
 import json
 import hashlib
+import re
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from datetime import datetime
 import pytz
-from bs4 import BeautifulSoup
 
 # Configuration
 TELEGRAM_TOKEN    = os.environ["TELEGRAM_TOKEN"]
@@ -91,95 +91,137 @@ def extract_json(text: str):
         print(f"[JSON Error] {e}")
         return None
 
-# Scrape Iraqi Securities Commission directly
-async def scrape_isc() -> list:
-    news = []
-    try:
-        async with httpx.AsyncClient(timeout=20, follow_redirects=True) as client:
-            resp = await client.get("https://isc.gov.iq/", headers={"User-Agent": "Mozilla/5.0"})
-            soup = BeautifulSoup(resp.text, "html.parser")
-            items = soup.find_all(["article", "div", "li"], limit=30)
-            for item in items:
-                text = item.get_text(strip=True)
-                links = item.find_all("a", href=True)
-                if len(text) > 30:
-                    news_id = hashlib.md5(text[:100].encode()).hexdigest()
-                    link = ""
-                    for a in links:
-                        href = a.get("href", "")
-                        if href.startswith("http") or href.startswith("/"):
-                            link = href if href.startswith("http") else f"https://isc.gov.iq{href}"
-                            break
-                    news.append({"id": news_id, "text": text[:300], "link": link, "source": "هيئة الأوراق المالية العراقية"})
-    except Exception as e:
-        print(f"[ISC Scrape Error] {e}")
-    return news
+# Scrape ISC directly for PDF news links
+async def scrape_isc_news() -> list:
+    news_items = []
+    urls_to_try = [
+        "https://isc.gov.iq/",
+        "https://isc.gov.iq/?do=view&type=news",
+        "https://isc.gov.iq/?lang=ar",
+    ]
+    headers = {
+        "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15",
+        "Accept-Language": "ar,en;q=0.9",
+    }
+    for url in urls_to_try:
+        try:
+            async with httpx.AsyncClient(timeout=20, follow_redirects=True) as client:
+                resp = await client.get(url, headers=headers)
+                html = resp.text
+                # Find all PDF links from isc.gov.iq/upload
+                pdf_links = re.findall(r'https://isc\.gov\.iq/upload/\d+/\d+/\d+/[a-zA-Z0-9]+\.pdf', html)
+                # Find news text around PDF links
+                for pdf in pdf_links:
+                    news_id = hashlib.md5(pdf.encode()).hexdigest()
+                    # Try to find surrounding text
+                    idx = html.find(pdf)
+                    surrounding = ""
+                    if idx > 0:
+                        start = max(0, idx - 300)
+                        end = min(len(html), idx + 200)
+                        raw = html[start:end]
+                        # Clean HTML tags
+                        clean = re.sub(r'<[^>]+>', ' ', raw)
+                        clean = re.sub(r'\s+', ' ', clean).strip()
+                        surrounding = clean[:400]
+                    news_items.append({
+                        "id": news_id,
+                        "text": surrounding if surrounding else "إعلان جديد من هيئة الأوراق المالية العراقية",
+                        "link": pdf,
+                        "source": "🇮🇶 هيئة الأوراق المالية العراقية"
+                    })
+            if news_items:
+                break
+        except Exception as e:
+            print(f"[ISC Error] {url}: {e}")
+    return news_items
 
-# Scrape Iraq Stock Exchange
-async def scrape_isx() -> list:
-    news = []
+# Scrape ISX news
+async def scrape_isx_news() -> list:
+    news_items = []
+    headers = {"User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X)"}
     try:
         async with httpx.AsyncClient(timeout=20, follow_redirects=True) as client:
-            resp = await client.get("https://www.isx-iq.net/isxportal/portal/newsDisplay.html", headers={"User-Agent": "Mozilla/5.0"})
-            soup = BeautifulSoup(resp.text, "html.parser")
-            rows = soup.find_all(["tr", "div", "article"], limit=20)
-            for row in rows:
-                text = row.get_text(strip=True)
-                if len(text) > 30:
-                    news_id = hashlib.md5(text[:100].encode()).hexdigest()
-                    news.append({"id": news_id, "text": text[:300], "link": "", "source": "بورصة العراق للأوراق المالية"})
+            resp = await client.get("https://www.isx-iq.net/isxportal/portal/newsDisplay.html", headers=headers)
+            html = resp.text
+            # Extract news rows
+            rows = re.findall(r'<tr[^>]*>(.*?)</tr>', html, re.DOTALL)
+            for row in rows[:20]:
+                clean = re.sub(r'<[^>]+>', ' ', row)
+                clean = re.sub(r'\s+', ' ', clean).strip()
+                if len(clean) > 40:
+                    news_id = hashlib.md5(clean[:80].encode()).hexdigest()
+                    # Look for PDF links
+                    pdfs = re.findall(r'href=["\']([^"\']*\.pdf[^"\']*)["\']', row)
+                    link = pdfs[0] if pdfs else ""
+                    if link and not link.startswith("http"):
+                        link = "https://www.isx-iq.net" + link
+                    news_items.append({
+                        "id": news_id,
+                        "text": clean[:400],
+                        "link": link,
+                        "source": "🇮🇶 بورصة العراق للأوراق المالية"
+                    })
     except Exception as e:
-        print(f"[ISX Scrape Error] {e}")
-    return news
+        print(f"[ISX Error] {e}")
+    return news_items
 
-# Scrape Dubai Financial Market
-async def scrape_dfm() -> list:
-    news = []
+# Scrape DFM news
+async def scrape_dfm_news() -> list:
+    news_items = []
+    headers = {"User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X)"}
     try:
         async with httpx.AsyncClient(timeout=20, follow_redirects=True) as client:
-            resp = await client.get("https://www.dfm.ae/en/news", headers={"User-Agent": "Mozilla/5.0"})
-            soup = BeautifulSoup(resp.text, "html.parser")
-            items = soup.find_all(["article", "div", "li"], limit=20)
-            for item in items:
-                text = item.get_text(strip=True)
-                if len(text) > 30:
-                    news_id = hashlib.md5(text[:100].encode()).hexdigest()
-                    links = item.find_all("a", href=True)
+            resp = await client.get("https://www.dfm.ae/the-exchange/news-announcement/market-news", headers=headers)
+            html = resp.text
+            # Find news items
+            items = re.findall(r'class="[^"]*news[^"]*"[^>]*>(.*?)</(?:div|article|li)>', html, re.DOTALL | re.IGNORECASE)
+            for item in items[:15]:
+                clean = re.sub(r'<[^>]+>', ' ', item)
+                clean = re.sub(r'\s+', ' ', clean).strip()
+                if len(clean) > 30:
+                    news_id = hashlib.md5(clean[:80].encode()).hexdigest()
+                    links = re.findall(r'href=["\']([^"\']+)["\']', item)
                     link = ""
-                    for a in links:
-                        href = a.get("href", "")
-                        if href:
-                            link = href if href.startswith("http") else f"https://www.dfm.ae{href}"
+                    for l in links:
+                        if "dfm.ae" in l or l.startswith("/"):
+                            link = l if l.startswith("http") else f"https://www.dfm.ae{l}"
                             break
-                    news.append({"id": news_id, "text": text[:300], "link": link, "source": "سوق دبي المالي"})
+                    news_items.append({
+                        "id": news_id,
+                        "text": clean[:400],
+                        "link": link,
+                        "source": "🇦🇪 سوق دبي المالي"
+                    })
     except Exception as e:
-        print(f"[DFM Scrape Error] {e}")
-    return news
+        print(f"[DFM Error] {e}")
+    return news_items
 
 # Local Markets Job
 async def local_markets_job():
     global seen_news
     all_news = []
-    all_news += await scrape_isc()
-    all_news += await scrape_isx()
-    all_news += await scrape_dfm()
+    all_news += await scrape_isc_news()
+    all_news += await scrape_isx_news()
+    all_news += await scrape_dfm_news()
 
     for item in all_news:
         news_id = item.get("id", "")
         if not news_id or news_id in seen_news:
             continue
         text = item.get("text", "").strip()
-        if len(text) < 50:
+        if len(text) < 30:
             continue
         seen_news.add(news_id)
         source = item.get("source", "")
         link = item.get("link", "")
-        emoji = "🇮🇶" if "عراق" in source or "العراق" in source else "🇦🇪"
-        msg = f"{emoji} *{source}*\n\n{text}"
+
+        today = datetime.now().strftime("%d/%m/%Y")
+        msg = f"{source}\n\n📅 {today}\n\n{text}"
         if link:
-            msg += f"\n\n🔗 {link}"
+            msg += f"\n\n📎 {link}"
         await send_telegram(msg)
-        await asyncio.sleep(1)
+        await asyncio.sleep(2)
 
 # Daily Report
 async def daily_report_job():
@@ -333,7 +375,7 @@ async def main():
     scheduler.add_job(gold_update_job,   "interval", minutes=15)
     scheduler.add_job(alert_check_job,   "interval", minutes=15)
     scheduler.add_job(news_check_job,    "interval", minutes=30)
-    scheduler.add_job(local_markets_job, "interval", minutes=30)
+    scheduler.add_job(local_markets_job, "interval", minutes=10)
     scheduler.start()
 
     print(f"✅ Bot started | {TIMEZONE}")
@@ -344,8 +386,8 @@ async def main():
         "🥇 تحديث الذهب: كل 15 دقيقة\n"
         "⚡️ تنبيهات المستويات: كل 15 دقيقة\n"
         "📰 أخبار الذهب والدولار: كل 30 دقيقة\n"
-        "🇮🇶 بورصة العراق وهيئة الأوراق المالية: مباشر\n"
-        "🇦🇪 سوق دبي المالي: مباشر\n\n"
+        "🇮🇶 هيئة الأوراق المالية وبورصة العراق: كل 10 دقائق\n"
+        "🇦🇪 سوق دبي المالي: كل 10 دقائق\n\n"
         "✅ أسعار دقيقة من Twelve Data"
     )
 
