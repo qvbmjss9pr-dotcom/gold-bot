@@ -3,12 +3,9 @@ import asyncio
 import anthropic
 import httpx
 import json
-import hashlib
-import re
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from datetime import datetime
 import pytz
-from bs4 import BeautifulSoup
 
 # Configuration
 TELEGRAM_TOKEN    = os.environ["TELEGRAM_TOKEN"]
@@ -34,11 +31,7 @@ SYMBOLS = {
     "BTCUSD": "BTC/USD",
 }
 
-HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
-}
-
-# Fetch real prices
+# ─── Fetch Prices ─────────────────────────────────────────────────────────────
 async def fetch_prices() -> dict:
     prices = {}
     symbols = ",".join(SYMBOLS.values())
@@ -56,7 +49,7 @@ async def fetch_prices() -> dict:
         print(f"[Price Error] {e}")
     return prices
 
-# Telegram
+# ─── Telegram ─────────────────────────────────────────────────────────────────
 async def send_telegram(text: str):
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     chunks = [text[i:i+4000] for i in range(0, len(text), 4000)]
@@ -70,7 +63,7 @@ async def send_telegram(text: str):
                 print(f"[Telegram Error] {e}")
             await asyncio.sleep(0.5)
 
-# Claude API
+# ─── Claude API ───────────────────────────────────────────────────────────────
 async def call_claude(prompt: str, max_tokens: int = 6000) -> str:
     client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
     message = client.messages.create(
@@ -95,122 +88,6 @@ def extract_json(text: str):
     except Exception as e:
         print(f"[JSON Error] {e}")
         return None
-
-# ─── ISX News (بورصة العراق) ──────────────────────────────────────────────────
-async def fetch_isx_news() -> list:
-    news_list = []
-    try:
-        async with httpx.AsyncClient(timeout=15, follow_redirects=True) as client:
-            resp = await client.get(
-                "http://www.isx-iq.net/isxweb/main/news.aspx",
-                headers=HEADERS
-            )
-            soup = BeautifulSoup(resp.content, "html.parser")
-            items = soup.find_all("span", id=lambda x: x and "lblNews" in x)
-            for item in items:
-                text = item.get_text(strip=True)
-                if text and len(text) > 20:
-                    news_list.append(text)
-    except Exception as e:
-        print(f"[ISX Error] {e}")
-    return news_list
-
-# ─── ISC News (هيئة الأوراق المالية) ─────────────────────────────────────────
-async def fetch_isc_news() -> list:
-    news_list = []
-    urls = ["https://isc.gov.iq/", "https://isc.gov.iq/?lang=ar"]
-    for url in urls:
-        try:
-            async with httpx.AsyncClient(timeout=15, follow_redirects=True) as client:
-                resp = await client.get(url, headers=HEADERS)
-                html = resp.text
-                pdfs = re.findall(
-                    r'https://isc\.gov\.iq/upload/\d{4}/\d{2}/\d{2}/[a-zA-Z0-9]+\.pdf',
-                    html
-                )
-                for pdf in pdfs:
-                    idx = html.find(pdf)
-                    if idx > 0:
-                        raw = html[max(0, idx-400):idx+100]
-                        clean = re.sub(r'<[^>]+>', ' ', raw)
-                        clean = re.sub(r'\s+', ' ', clean).strip()
-                        news_list.append({"text": clean[:500], "link": pdf})
-                    else:
-                        news_list.append({"text": "إعلان جديد", "link": pdf})
-            if news_list:
-                break
-        except Exception as e:
-            print(f"[ISC Error] {url}: {e}")
-    return news_list
-
-# ─── DFM News (سوق دبي) ───────────────────────────────────────────────────────
-async def fetch_dfm_news() -> list:
-    news_list = []
-    try:
-        async with httpx.AsyncClient(timeout=15, follow_redirects=True) as client:
-            resp = await client.get(
-                "https://www.dfm.ae/the-exchange/news-announcement/market-news",
-                headers=HEADERS
-            )
-            soup = BeautifulSoup(resp.content, "html.parser")
-            for tag in ["article", "div", "li"]:
-                items = soup.find_all(tag, class_=re.compile(r"news|announce|item", re.I))
-                for item in items[:10]:
-                    text = item.get_text(strip=True)
-                    if len(text) > 30:
-                        link_tag = item.find("a", href=True)
-                        link = ""
-                        if link_tag:
-                            href = link_tag["href"]
-                            link = href if href.startswith("http") else f"https://www.dfm.ae{href}"
-                        news_list.append({"text": text[:400], "link": link})
-                if news_list:
-                    break
-    except Exception as e:
-        print(f"[DFM Error] {e}")
-    return news_list
-
-# ─── Local Markets Job ────────────────────────────────────────────────────────
-async def local_markets_job():
-    global seen_news
-    today = datetime.now().strftime("%d/%m/%Y")
-
-    isx_news = await fetch_isx_news()
-    for text in isx_news:
-        news_id = hashlib.md5(text[:80].encode()).hexdigest()
-        if news_id in seen_news or len(text) < 20:
-            continue
-        seen_news.add(news_id)
-        await send_telegram(f"🇮🇶 *بورصة العراق للأوراق المالية*\n\n📅 {today}\n\n{text}")
-        await asyncio.sleep(1)
-
-    isc_news = await fetch_isc_news()
-    for item in isc_news:
-        link = item.get("link", "")
-        news_id = hashlib.md5(link.encode()).hexdigest()
-        if news_id in seen_news:
-            continue
-        seen_news.add(news_id)
-        text = item.get("text", "إعلان جديد من هيئة الأوراق المالية العراقية")
-        msg = f"🇮🇶 *هيئة الأوراق المالية العراقية*\n\n📅 {today}\n\n{text}"
-        if link:
-            msg += f"\n\n📎 {link}"
-        await send_telegram(msg)
-        await asyncio.sleep(1)
-
-    dfm_news = await fetch_dfm_news()
-    for item in dfm_news:
-        text = item.get("text", "")
-        news_id = hashlib.md5(text[:80].encode()).hexdigest()
-        if news_id in seen_news or len(text) < 30:
-            continue
-        seen_news.add(news_id)
-        link = item.get("link", "")
-        msg = f"🇦🇪 *سوق دبي المالي*\n\n📅 {today}\n\n{text}"
-        if link:
-            msg += f"\n\n📎 {link}"
-        await send_telegram(msg)
-        await asyncio.sleep(1)
 
 # ─── Daily Report ─────────────────────────────────────────────────────────────
 async def daily_report_job():
@@ -251,7 +128,12 @@ async def daily_report_job():
         data = extract_json(response)
         if data and isinstance(data, dict):
             alert_levels = {
-                asset: {"resistance": vals.get("resistance", 0), "support": vals.get("support", 0), "res_alerted": False, "sup_alerted": False}
+                asset: {
+                    "resistance": vals.get("resistance", 0),
+                    "support": vals.get("support", 0),
+                    "res_alerted": False,
+                    "sup_alerted": False
+                }
                 for asset, vals in data.items()
             }
             await send_telegram("✅ *تم تحديث مستويات التنبيه التلقائية.*")
@@ -344,24 +226,24 @@ async def main():
     scheduler.add_job(daily_report_job, "cron", hour=22, minute=0)
 
     # تحديث الذهب كل 15 دقيقة
-    scheduler.add_job(gold_update_job,   "interval", minutes=15)
-    scheduler.add_job(alert_check_job,   "interval", minutes=15)
-    scheduler.add_job(news_check_job,    "interval", minutes=30)
-    scheduler.add_job(local_markets_job, "interval", minutes=10)
+    scheduler.add_job(gold_update_job, "interval", minutes=15)
+
+    # تنبيهات المستويات كل 15 دقيقة
+    scheduler.add_job(alert_check_job, "interval", minutes=15)
+
+    # أخبار الذهب والدولار كل 30 دقيقة
+    scheduler.add_job(news_check_job, "interval", minutes=30)
 
     scheduler.start()
-
     print(f"✅ Bot started | {TIMEZONE}")
 
     await send_telegram(
-        "🤖 *بوت الأسواق المالية — النسخة النهائية*\n\n"
+        "🤖 *بوت الأسواق المالية العالمية*\n\n"
         "📅 النشرة الصباحية: 10:00 صباحاً بتوقيت بغداد\n"
         "📅 النشرة المسائية: 10:00 مساءً بتوقيت بغداد\n"
         "🥇 تحديث الذهب: كل 15 دقيقة\n"
         "⚡️ تنبيهات المستويات: كل 15 دقيقة\n"
-        "📰 أخبار الذهب والدولار: كل 30 دقيقة\n"
-        "🇮🇶 بورصة العراق وهيئة الأوراق المالية: كل 10 دقائق\n"
-        "🇦🇪 سوق دبي المالي: كل 10 دقائق\n\n"
+        "📰 أخبار الذهب والدولار: كل 30 دقيقة\n\n"
         "✅ أسعار دقيقة من Twelve Data"
     )
 
