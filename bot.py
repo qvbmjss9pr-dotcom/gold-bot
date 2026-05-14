@@ -106,7 +106,6 @@ async def fetch_isx_news() -> list:
                 headers=HEADERS
             )
             soup = BeautifulSoup(resp.content, "html.parser")
-            # Target span elements with lblNews in their id
             items = soup.find_all("span", id=lambda x: x and "lblNews" in x)
             for item in items:
                 text = item.get_text(strip=True)
@@ -125,13 +124,11 @@ async def fetch_isc_news() -> list:
             async with httpx.AsyncClient(timeout=15, follow_redirects=True) as client:
                 resp = await client.get(url, headers=HEADERS)
                 html = resp.text
-                # Find PDF upload links
                 pdfs = re.findall(
                     r'https://isc\.gov\.iq/upload/\d{4}/\d{2}/\d{2}/[a-zA-Z0-9]+\.pdf',
                     html
                 )
                 for pdf in pdfs:
-                    # Get surrounding text
                     idx = html.find(pdf)
                     if idx > 0:
                         raw = html[max(0, idx-400):idx+100]
@@ -156,7 +153,6 @@ async def fetch_dfm_news() -> list:
                 headers=HEADERS
             )
             soup = BeautifulSoup(resp.content, "html.parser")
-            # Find news items
             for tag in ["article", "div", "li"]:
                 items = soup.find_all(tag, class_=re.compile(r"news|announce|item", re.I))
                 for item in items[:10]:
@@ -179,7 +175,6 @@ async def local_markets_job():
     global seen_news
     today = datetime.now().strftime("%d/%m/%Y")
 
-    # ISX
     isx_news = await fetch_isx_news()
     for text in isx_news:
         news_id = hashlib.md5(text[:80].encode()).hexdigest()
@@ -189,7 +184,6 @@ async def local_markets_job():
         await send_telegram(f"🇮🇶 *بورصة العراق للأوراق المالية*\n\n📅 {today}\n\n{text}")
         await asyncio.sleep(1)
 
-    # ISC
     isc_news = await fetch_isc_news()
     for item in isc_news:
         link = item.get("link", "")
@@ -204,7 +198,6 @@ async def local_markets_job():
         await send_telegram(msg)
         await asyncio.sleep(1)
 
-    # DFM
     dfm_news = await fetch_dfm_news()
     for item in dfm_news:
         text = item.get("text", "")
@@ -222,12 +215,14 @@ async def local_markets_job():
 # ─── Daily Report ─────────────────────────────────────────────────────────────
 async def daily_report_job():
     global alert_levels
-    print(f"[{datetime.now()}] Running daily report...")
+    now = datetime.now(pytz.timezone(TIMEZONE))
+    session = "الصباحية 🌅" if now.hour < 12 else "المسائية 🌙"
+    print(f"[{now}] Running daily report ({session})...")
     try:
         prices = await fetch_prices()
         prices_text = "\n".join([f"- {k}: {v}" for k, v in prices.items()]) if prices else "غير متاحة"
         prompt = f"""
-أنت محلل أسواق مالي محترف. أصدر نشرة يومية شاملة بعد إغلاق الأسواق.
+أنت محلل أسواق مالي محترف. أصدر نشرة {session} شاملة.
 
 الأسعار الحالية الدقيقة:
 {prices_text}
@@ -246,7 +241,7 @@ async def daily_report_job():
 {{"EURUSD":{{"resistance":0.0,"support":0.0}},"GBPUSD":{{"resistance":0.0,"support":0.0}},"USDJPY":{{"resistance":0.0,"support":0.0}},"USDCHF":{{"resistance":0.0,"support":0.0}},"AUDUSD":{{"resistance":0.0,"support":0.0}},"USDCAD":{{"resistance":0.0,"support":0.0}},"GBPJPY":{{"resistance":0.0,"support":0.0}},"XAUUSD":{{"resistance":0.0,"support":0.0}},"WTIUSD":{{"resistance":0.0,"support":0.0}},"BTCUSD":{{"resistance":0.0,"support":0.0}},"SPX500":{{"resistance":0.0,"support":0.0}},"NASDAQ":{{"resistance":0.0,"support":0.0}},"DAX":{{"resistance":0.0,"support":0.0}},"DOWJONES":{{"resistance":0.0,"support":0.0}}}}
 [JSON_END]
 
-النشرة باللغة العربية. ابدأ بـ: 📊 *النشرة اليومية الشاملة* — [التاريخ]
+النشرة باللغة العربية. ابدأ بـ: 📊 *النشرة {session} الشاملة* — {now.strftime('%d/%m/%Y %H:%M')} بتوقيت بغداد
 """
         response = await call_claude(prompt, max_tokens=8000)
         clean = response
@@ -282,7 +277,7 @@ async def gold_update_job():
                     f"🥇 *تحديث الذهب اللحظي*\n\n"
                     f"السعر: *{price:.2f}* دولار\n"
                     f"التغيير: {arrow} {abs(change):.2f}\n"
-                    f"🕐 {datetime.now().strftime('%H:%M')} بغداد"
+                    f"🕐 {datetime.now(pytz.timezone(TIMEZONE)).strftime('%H:%M')} بغداد"
                 )
             last_gold_price = price
     except Exception as e:
@@ -343,19 +338,25 @@ async def news_check_job():
 async def main():
     tz        = pytz.timezone(TIMEZONE)
     scheduler = AsyncIOScheduler(timezone=tz)
-    scheduler.add_job(daily_report_job,  "cron",     hour=0,  minute=0)
-    scheduler.add_job(daily_report_job,  "date")
+
+    # ✅ النشرة مرتين يومياً — 10 صباحاً و 10 مساءً بتوقيت بغداد
+    scheduler.add_job(daily_report_job, "cron", hour=10, minute=0)
+    scheduler.add_job(daily_report_job, "cron", hour=22, minute=0)
+
+    # تحديث الذهب كل 15 دقيقة
     scheduler.add_job(gold_update_job,   "interval", minutes=15)
     scheduler.add_job(alert_check_job,   "interval", minutes=15)
     scheduler.add_job(news_check_job,    "interval", minutes=30)
     scheduler.add_job(local_markets_job, "interval", minutes=10)
+
     scheduler.start()
 
     print(f"✅ Bot started | {TIMEZONE}")
 
     await send_telegram(
         "🤖 *بوت الأسواق المالية — النسخة النهائية*\n\n"
-        "📅 النشرة اليومية: 12:00 ليلاً\n"
+        "📅 النشرة الصباحية: 10:00 صباحاً بتوقيت بغداد\n"
+        "📅 النشرة المسائية: 10:00 مساءً بتوقيت بغداد\n"
         "🥇 تحديث الذهب: كل 15 دقيقة\n"
         "⚡️ تنبيهات المستويات: كل 15 دقيقة\n"
         "📰 أخبار الذهب والدولار: كل 30 دقيقة\n"
